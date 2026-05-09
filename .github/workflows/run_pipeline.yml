@@ -72,10 +72,26 @@ jobs:
             done
           done
 
+      - name: Validate workflow inputs
+        run: |
+          SOURCE="${{ github.event.inputs.news_source }}"
+          LIMIT="${{ github.event.inputs.article_limit }}"
+          VALID_SOURCES="yahoo_finance reuters_business cnbc_top marketwatch seeking_alpha"
+          if ! echo "$VALID_SOURCES" | grep -qw "$SOURCE"; then
+            echo "ERROR: invalid news_source '$SOURCE'" && exit 1
+          fi
+          if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || [ "$LIMIT" -lt 1 ] || [ "$LIMIT" -gt 30 ]; then
+            echo "ERROR: article_limit must be 1-30, got '$LIMIT'" && exit 1
+          fi
+          echo "Inputs validated: source=$SOURCE limit=$LIMIT"
+
       - name: Run Finance NLP pipeline
+        env:
+          SOURCE: ${{ github.event.inputs.news_source }}
+          LIMIT: ${{ github.event.inputs.article_limit }}
         run: |
           curl -sf \
-            "http://localhost:8000/api/run?source=${{ github.event.inputs.news_source }}&limit=${{ github.event.inputs.article_limit }}" \
+            "http://localhost:8000/api/run?source=${SOURCE}&limit=${LIMIT}" \
             -o pipeline_result.json
           python scripts/print_results.py
 

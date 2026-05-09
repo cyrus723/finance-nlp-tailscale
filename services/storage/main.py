@@ -14,10 +14,17 @@ TAILSCALE CONCEPT — Subnet routing:
 """
 
 import os
-from fastapi import FastAPI, HTTPException
+import sys
+import logging
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, Annotated
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+from _shared.auth import require_internal_key
+
+logger = logging.getLogger(__name__)
 
 from models import (
     init_db, insert_article, insert_analysis,
@@ -39,11 +46,11 @@ def startup():
 # ── Request models ────────────────────────────────────────────────────────────
 
 class ArticleIn(BaseModel):
-    title:     str
-    summary:   Optional[str] = None
-    link:      Optional[str] = None
-    published: Optional[str] = None
-    source:    Optional[str] = None
+    title:     Annotated[str, Field(min_length=1, max_length=1_000)]
+    summary:   Optional[Annotated[str, Field(max_length=5_000)]] = None
+    link:      Optional[Annotated[str, Field(max_length=2_048)]] = None
+    published: Optional[Annotated[str, Field(max_length=100)]]  = None
+    source:    Optional[Annotated[str, Field(max_length=100)]]  = None
 
 
 class AnalysisIn(BaseModel):
@@ -52,12 +59,12 @@ class AnalysisIn(BaseModel):
 
 
 class RunLogIn(BaseModel):
-    source:      Optional[str] = None
-    articles_in: int = 0
-    analyzed:    int = 0
-    bullish:     int = 0
-    bearish:     int = 0
-    neutral:     int = 0
+    source:      Optional[Annotated[str, Field(max_length=100)]] = None
+    articles_in: Annotated[int, Field(ge=0)] = 0
+    analyzed:    Annotated[int, Field(ge=0)] = 0
+    bullish:     Annotated[int, Field(ge=0)] = 0
+    bearish:     Annotated[int, Field(ge=0)] = 0
+    neutral:     Annotated[int, Field(ge=0)] = 0
 
 
 # ── Write endpoints ───────────────────────────────────────────────────────────
@@ -67,7 +74,8 @@ def root():
     return {"service": "storage-node", "status": "ok"}
 
 
-@app.post("/articles", summary="Store a new article")
+@app.post("/articles", summary="Store a new article",
+          dependencies=[Depends(require_internal_key)])
 def create_article(article: ArticleIn):
     """
     Stores an article fetched by the Ingestion node.
@@ -77,21 +85,35 @@ def create_article(article: ArticleIn):
       endpoint receives a request, the Dashboard node is authenticated by its
       Tailscale identity — no username/password required.
     """
-    article_id = insert_article(article.model_dump())
-    return {"article_id": article_id}
+    try:
+        article_id = insert_article(article.model_dump())
+        return {"article_id": article_id}
+    except Exception:
+        logger.exception("Failed to insert article")
+        raise HTTPException(status_code=500, detail="Storage error")
 
 
-@app.post("/analyses", summary="Store NLP analysis for an article")
+@app.post("/analyses", summary="Store NLP analysis for an article",
+          dependencies=[Depends(require_internal_key)])
 def create_analysis(payload: AnalysisIn):
     """Stores the NLP result produced by the NLP Processor node."""
-    analysis_id = insert_analysis(payload.article_id, payload.nlp_result)
-    return {"analysis_id": analysis_id}
+    try:
+        analysis_id = insert_analysis(payload.article_id, payload.nlp_result)
+        return {"analysis_id": analysis_id}
+    except Exception:
+        logger.exception("Failed to insert analysis")
+        raise HTTPException(status_code=500, detail="Storage error")
 
 
-@app.post("/runs", summary="Log a pipeline run summary")
+@app.post("/runs", summary="Log a pipeline run summary",
+          dependencies=[Depends(require_internal_key)])
 def log_pipeline_run(run: RunLogIn):
-    log_run(run.model_dump())
-    return {"status": "logged"}
+    try:
+        log_run(run.model_dump())
+        return {"status": "logged"}
+    except Exception:
+        logger.exception("Failed to log run")
+        raise HTTPException(status_code=500, detail="Storage error")
 
 
 # ── Read endpoints ────────────────────────────────────────────────────────────

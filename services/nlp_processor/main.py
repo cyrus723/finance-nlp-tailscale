@@ -13,14 +13,20 @@ TAILSCALE CONCEPT — Peer-to-peer encryption:
 """
 
 import os
+import sys
 import time
-from fastapi import FastAPI, Body
+import logging
+from fastapi import FastAPI, Body, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, Annotated
 
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+from _shared.auth import require_internal_key
 from sentiment import FinanceSentimentAnalyzer
 from entities import extract_as_dict
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Finance NLP Processor Node",
@@ -34,13 +40,13 @@ _analyzer = FinanceSentimentAnalyzer()
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
-    text: str
-    source: Optional[str] = None
+    text:     Annotated[str, Field(min_length=1, max_length=10_000)]
+    source:   Optional[Annotated[str, Field(max_length=100)]] = None
     metadata: Optional[dict] = None
 
 
 class BatchAnalyzeRequest(BaseModel):
-    items: list[AnalyzeRequest]
+    items: Annotated[list[AnalyzeRequest], Field(min_length=1, max_length=500)]
 
 
 class AnalysisResult(BaseModel):
@@ -62,7 +68,8 @@ def root():
     return {"service": "nlp-processor-node", "status": "ok"}
 
 
-@app.post("/analyze", response_model=AnalysisResult, summary="Analyze one text")
+@app.post("/analyze", response_model=AnalysisResult, summary="Analyze one text",
+          dependencies=[Depends(require_internal_key)])
 def analyze(req: AnalyzeRequest = Body(...)):
     """
     Full NLP pipeline for a single text:
@@ -86,7 +93,8 @@ def analyze(req: AnalyzeRequest = Body(...)):
     }
 
 
-@app.post("/analyze/batch", summary="Analyze a list of texts")
+@app.post("/analyze/batch", summary="Analyze a list of texts",
+          dependencies=[Depends(require_internal_key)])
 def analyze_batch(req: BatchAnalyzeRequest = Body(...)):
     """
     Processes multiple articles in one round-trip — reduces latency over the

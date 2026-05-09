@@ -6,12 +6,13 @@ point Tailscale's subnet router at your PostgreSQL cluster and all nodes reach
 it by internal hostname without any firewall changes.
 """
 
+import os
 import sqlite3
 import json
 import time
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "finance_nlp.db"
+DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "finance_nlp.db")))
 
 
 def get_conn() -> sqlite3.Connection:
@@ -22,6 +23,8 @@ def get_conn() -> sqlite3.Connection:
 
 def init_db() -> None:
     """Create tables if they don't exist."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.umask(0o077)  # Restrict DB file to owner only
     with get_conn() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS articles (

@@ -16,12 +16,16 @@ TAILSCALE CONCEPT — Why this node exists as a separate service:
 import os
 import re
 import time
+import logging
 import feedparser
 import yfinance as yf
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from enum import Enum
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Finance Ingestion Node",
@@ -29,13 +33,20 @@ app = FastAPI(
     version="1.0.0",
 )
 
+class NewsSource(str, Enum):
+    yahoo_finance    = "yahoo_finance"
+    reuters_business = "reuters_business"
+    cnbc_top         = "cnbc_top"
+    seeking_alpha    = "seeking_alpha"
+    marketwatch      = "marketwatch"
+
 # ── RSS feed catalogue (public, no API key required) ──────────────────────────
 RSS_FEEDS = {
-    "yahoo_finance":    "https://finance.yahoo.com/rss/topstories",
-    "reuters_business": "https://feeds.reuters.com/reuters/businessNews",
-    "cnbc_top":         "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-    "seeking_alpha":    "https://seekingalpha.com/feed.xml",
-    "marketwatch":      "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    NewsSource.yahoo_finance:    "https://finance.yahoo.com/rss/topstories",
+    NewsSource.reuters_business: "https://feeds.reuters.com/reuters/businessNews",
+    NewsSource.cnbc_top:         "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    NewsSource.seeking_alpha:    "https://seekingalpha.com/feed.xml",
+    NewsSource.marketwatch:      "https://feeds.content.dowjones.io/public/rss/mw_topstories",
 }
 
 TICKER_PATTERN = re.compile(r'\b([A-Z]{1,5})\b')
@@ -111,8 +122,8 @@ def root():
 
 @app.get("/news", response_model=list[NewsItem], summary="Fetch financial news")
 def get_news(
-    source: str = Query("yahoo_finance", description=f"Feed key: {list(RSS_FEEDS)}"),
-    limit:  int = Query(10, ge=1, le=50, description="Max articles to return"),
+    source: NewsSource = Query(NewsSource.yahoo_finance, description="Feed key"),
+    limit:  int        = Query(10, ge=1, le=50, description="Max articles to return"),
 ):
     """
     Fetches the latest financial news from the chosen RSS source.
@@ -123,8 +134,8 @@ def get_news(
       Tailscale resolves that hostname to the node's private WireGuard IP
       automatically.  You never hard-code IP addresses.
     """
-    feed_url = RSS_FEEDS.get(source, RSS_FEEDS["yahoo_finance"])
-    items = _parse_feed(source, feed_url, limit)
+    feed_url = RSS_FEEDS[source]
+    items = _parse_feed(source.value, feed_url, limit)
     return JSONResponse(content=items)
 
 
@@ -133,9 +144,11 @@ def get_all_news(limit_per_feed: int = Query(5, ge=1, le=20)):
     """Fetches from every registered RSS feed and merges results."""
     results = []
     for key, url in RSS_FEEDS.items():
-        results.extend(_parse_feed(key, url, limit_per_feed))
+        results.extend(_parse_feed(key.value, url, limit_per_feed))
     return JSONResponse(content=results)
 
+
+_TICKER_VALID = re.compile(r'^[A-Z0-9\-\.]{1,10}$')
 
 @app.get("/stock/{ticker}", response_model=StockSnapshot, summary="Market snapshot")
 def get_stock(ticker: str):
@@ -147,6 +160,8 @@ def get_stock(ticker: str):
       See tailscale_config/acl_policy.hujson for the rules.
     """
     ticker = ticker.upper()
+    if not _TICKER_VALID.match(ticker):
+        raise HTTPException(status_code=422, detail="Invalid ticker format")
     try:
         info = yf.Ticker(ticker).fast_info
         price      = getattr(info, "last_price",         None)
@@ -156,6 +171,7 @@ def get_stock(ticker: str):
         if mkt_cap:
             mkt_cap = f"${mkt_cap / 1e9:.2f}B" if mkt_cap >= 1e9 else f"${mkt_cap / 1e6:.1f}M"
     except Exception:
+        logger.warning("yfinance lookup failed for %s", ticker)
         price = change_pct = volume = mkt_cap = None
 
     return {

@@ -18,26 +18,36 @@ TAILSCALE CONCEPT — MagicDNS hostnames:
 """
 
 import os
+import re
 import time
+import logging
 import httpx
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
-# ── Node addresses (override with env vars / Tailscale hostnames) ─────────────
-INGESTION_URL = (
-    f"http://{os.getenv('INGESTION_HOST', 'localhost')}:"
-    f"{os.getenv('INGESTION_PORT', '8001')}"
-)
-NLP_URL = (
-    f"http://{os.getenv('NLP_HOST', 'localhost')}:"
-    f"{os.getenv('NLP_PORT', '8002')}"
-)
-STORAGE_URL = (
-    f"http://{os.getenv('STORAGE_HOST', 'localhost')}:"
-    f"{os.getenv('STORAGE_PORT', '8003')}"
-)
+logger = logging.getLogger(__name__)
+
+# ── Validate and build peer URLs ───────────────────────────────────────────────
+_HOST_RE = re.compile(r'^[a-zA-Z0-9\-\.]+$')
+
+def _build_url(host: str, port: str) -> str:
+    if not _HOST_RE.match(host):
+        raise ValueError(f"Invalid host: {host!r}")
+    p = int(port)
+    if not (1 <= p <= 65535):
+        raise ValueError(f"Invalid port: {port!r}")
+    return f"http://{host}:{p}"
+
+INGESTION_URL = _build_url(os.getenv("INGESTION_HOST", "localhost"), os.getenv("INGESTION_PORT", "8001"))
+NLP_URL       = _build_url(os.getenv("NLP_HOST",       "localhost"), os.getenv("NLP_PORT",       "8002"))
+STORAGE_URL   = _build_url(os.getenv("STORAGE_HOST",   "localhost"), os.getenv("STORAGE_PORT",   "8003"))
+
+# ── Internal API key injected on all outbound service calls ───────────────────
+_INTERNAL_KEY = os.getenv("INTERNAL_API_KEY", "")
+_AUTH_HEADERS = {"X-Internal-Key": _INTERNAL_KEY} if _INTERNAL_KEY else {}
 
 TIMEOUT = httpx.Timeout(30.0)
 
@@ -49,6 +59,22 @@ app = FastAPI(
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
+# ── Security middleware ────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[f"http://localhost:{os.getenv('DASHBOARD_PORT', '8000')}"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -57,7 +83,8 @@ async def _check_node(client: httpx.AsyncClient, name: str, url: str) -> dict:
         r = await client.get(f"{url}/", timeout=5.0)
         return {"node": name, "url": url, "status": "online", "latency_ms": round(r.elapsed.total_seconds() * 1000, 1)}
     except Exception as exc:
-        return {"node": name, "url": url, "status": "offline", "error": str(exc)}
+        logger.warning("Node %s unreachable", name)
+        return {"node": name, "url": url, "status": "offline", "error": "unreachable"}
 
 
 async def _run_pipeline(source: str, limit: int) -> dict:
@@ -80,8 +107,9 @@ async def _run_pipeline(source: str, limit: int) -> dict:
                                  params={"source": source, "limit": limit})
             r.raise_for_status()
             articles = r.json()
-        except Exception as exc:
-            return {"error": f"Ingestion node unreachable: {exc}", "results": []}
+        except Exception:
+            logger.exception("Ingestion node error")
+            return {"error": "Ingestion service unavailable", "results": []}
 
         # ── Step 2: NLP batch ─────────────────────────────────────────────────
         batch_payload = {
@@ -92,11 +120,13 @@ async def _run_pipeline(source: str, limit: int) -> dict:
             ]
         }
         try:
-            r = await client.post(f"{NLP_URL}/analyze/batch", json=batch_payload)
+            r = await client.post(f"{NLP_URL}/analyze/batch",
+                                  json=batch_payload, headers=_AUTH_HEADERS)
             r.raise_for_status()
             nlp_results = r.json()["results"]
-        except Exception as exc:
-            errors.append(f"NLP node: {exc}")
+        except Exception:
+            logger.exception("NLP node error")
+            errors.append("NLP service unavailable")
             nlp_results = [None] * len(articles)
 
         # ── Step 3: Store + assemble ──────────────────────────────────────────
@@ -104,13 +134,16 @@ async def _run_pipeline(source: str, limit: int) -> dict:
 
         for article, nlp in zip(articles, nlp_results):
             try:
-                r = await client.post(f"{STORAGE_URL}/articles", json=article)
+                r = await client.post(f"{STORAGE_URL}/articles",
+                                      json=article, headers=_AUTH_HEADERS)
                 article_id = r.json().get("article_id")
                 if nlp and article_id:
                     await client.post(f"{STORAGE_URL}/analyses",
-                                      json={"article_id": article_id, "nlp_result": nlp})
-            except Exception as exc:
-                errors.append(f"Storage: {exc}")
+                                      json={"article_id": article_id, "nlp_result": nlp},
+                                      headers=_AUTH_HEADERS)
+            except Exception:
+                logger.exception("Storage node error")
+                errors.append("Storage service unavailable")
 
             if nlp:
                 label = nlp.get("sentiment", {}).get("label", "Neutral")
@@ -126,14 +159,14 @@ async def _run_pipeline(source: str, limit: int) -> dict:
 
         # Log run summary
         try:
-            await client.post(f"{STORAGE_URL}/runs", json={
+            await client.post(f"{STORAGE_URL}/runs", headers=_AUTH_HEADERS, json={
                 "source":      source,
                 "articles_in": len(articles),
                 "analyzed":    len(results),
                 **counts,
             })
         except Exception:
-            pass
+            logger.warning("Failed to log run to storage")
 
     elapsed = round(time.time() - pipeline_start, 2)
     return {
