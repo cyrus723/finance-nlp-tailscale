@@ -1,0 +1,266 @@
+# Finance NLP Pipeline — Manual Trigger
+# =======================================
+# Run this from: GitHub → Actions tab → "Finance NLP Pipeline" → Run workflow
+#
+# TAILSCALE NOTE:
+#   In this Actions environment all 4 services run on localhost (same runner),
+#   which mirrors exactly how demo_local.py works on your machine.
+#   For a real Tailscale deployment across cloud VMs, see the README and
+#   docker-compose.tailscale.yml.
+
+name: Finance NLP Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      news_source:
+        description: "RSS feed to fetch from"
+        required: true
+        default: "yahoo_finance"
+        type: choice
+        options:
+          - yahoo_finance
+          - reuters_business
+          - cnbc_top
+          - marketwatch
+          - seeking_alpha
+      article_limit:
+        description: "Number of articles to analyse (1-30)"
+        required: true
+        default: "10"
+        type: string
+
+jobs:
+  run-finance-nlp:
+    name: "Run Finance NLP Pipeline"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. Start all four nodes ──────────────────────────────────────────────
+      - name: Start ingestion node (:8001)
+        working-directory: services/ingestion
+        env:
+          INGESTION_PORT: "8001"
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8001 --log-level warning &
+          echo "INGESTION_PID=$!" >> $GITHUB_ENV
+
+      - name: Start NLP processor node (:8002)
+        working-directory: services/nlp_processor
+        env:
+          NLP_PORT: "8002"
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8002 --log-level warning &
+          echo "NLP_PID=$!" >> $GITHUB_ENV
+
+      - name: Start storage node (:8003)
+        working-directory: services/storage
+        env:
+          STORAGE_PORT: "8003"
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8003 --log-level warning &
+          echo "STORAGE_PID=$!" >> $GITHUB_ENV
+
+      - name: Start dashboard node (:8000)
+        working-directory: services/dashboard
+        env:
+          DASHBOARD_PORT: "8000"
+          INGESTION_HOST: "localhost"
+          INGESTION_PORT: "8001"
+          NLP_HOST: "localhost"
+          NLP_PORT: "8002"
+          STORAGE_HOST: "localhost"
+          STORAGE_PORT: "8003"
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 --log-level warning &
+          echo "DASHBOARD_PID=$!" >> $GITHUB_ENV
+
+      # ── 4. Wait for all nodes to be healthy ──────────────────────────────────
+      - name: Wait for nodes to be ready
+        run: |
+          echo "Waiting for all 4 nodes..."
+          for port in 8000 8001 8002 8003; do
+            for i in $(seq 1 20); do
+              if curl -sf "http://localhost:$port/" > /dev/null 2>&1; then
+                echo "  :$port -> online"
+                break
+              fi
+              sleep 1
+            done
+          done
+
+      # ── 5. Run the pipeline ───────────────────────────────────────────────────
+      - name: Run Finance NLP pipeline
+        id: pipeline
+        env:
+          SOURCE: ${{ github.event.inputs.news_source }}
+          LIMIT:  ${{ github.event.inputs.article_limit }}
+        run: |
+          echo "Triggering pipeline: source=$SOURCE limit=$LIMIT"
+          curl -sf "http://localhost:8000/api/run?source=${SOURCE}&limit=${LIMIT}" \
+            -o pipeline_result.json
+          echo "Pipeline complete."
+          cat pipeline_result.json | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print(f'Articles fetched : {d[\"articles_in\"]}')
+          print(f'Articles analysed: {d[\"analyzed\"]}')
+          print(f'Elapsed          : {d[\"elapsed_sec\"]}s')
+          c = d.get('counts', {})
+          print(f'Bullish: {c.get(\"Bullish\",0)}  Bearish: {c.get(\"Bearish\",0)}  Neutral: {c.get(\"Neutral\",0)}')
+          "
+
+      # ── 6. Generate HTML report ───────────────────────────────────────────────
+      - name: Generate HTML report
+        run: |
+          python3 - <<'EOF'
+          import json, html, datetime
+
+          with open("pipeline_result.json") as f:
+              data = json.load(f)
+
+          results = data.get("results", [])
+          counts  = data.get("counts", {})
+          source  = data.get("source", "")
+          elapsed = data.get("elapsed_sec", 0)
+          now     = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+          COLOR = {"Bullish": "#22c55e", "Bearish": "#ef4444", "Neutral": "#a3a3a3"}
+          ICON  = {"Bullish": "▲", "Bearish": "▼", "Neutral": "—"}
+
+          rows = ""
+          for r in results:
+              s = r.get("sentiment", {})
+              e = r.get("entities", {})
+              label    = s.get("label", "Neutral")
+              compound = s.get("compound", 0)
+              tickers  = ", ".join(e.get("tickers", [])[:5]) or "—"
+              title    = html.escape(r.get("title", ""))
+              link     = html.escape(r.get("link", ""))
+              src      = html.escape(r.get("source", ""))
+              col      = COLOR.get(label, "#a3a3a3")
+              icon     = ICON.get(label, "—")
+              rows += f"""
+              <tr>
+                <td><a href="{link}" target="_blank">{title}</a><br>
+                    <small style="color:#64748b">{src}</small></td>
+                <td style="color:{col};font-weight:700;white-space:nowrap">{icon} {label}</td>
+                <td style="font-family:monospace">{compound:+.3f}</td>
+                <td style="font-family:monospace;font-size:12px">{tickers}</td>
+              </tr>"""
+
+          total = data.get("articles_in", 0) or 1
+          b_pct = round(counts.get("Bullish", 0) / total * 100)
+          r_pct = round(counts.get("Bearish", 0) / total * 100)
+          n_pct = round(counts.get("Neutral", 0) / total * 100)
+
+          html_out = f"""<!DOCTYPE html>
+          <html><head><meta charset="UTF-8">
+          <title>Finance NLP Report — {now}</title>
+          <style>
+            body{{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;margin:0;padding:24px}}
+            h1{{color:#818cf8;font-size:20px}} h2{{color:#94a3b8;font-size:13px;font-weight:400;margin-top:4px}}
+            .bar{{display:flex;height:14px;border-radius:99px;overflow:hidden;max-width:400px;margin:16px 0}}
+            table{{width:100%;border-collapse:collapse;margin-top:20px;font-size:13px}}
+            th{{text-align:left;padding:8px 12px;border-bottom:1px solid #2e3250;color:#64748b;font-weight:600;font-size:11px;text-transform:uppercase}}
+            td{{padding:8px 12px;border-bottom:1px solid #1a1d27;vertical-align:top}}
+            a{{color:#7dd3fc;text-decoration:none}} a:hover{{text-decoration:underline}}
+          </style></head>
+          <body>
+          <h1>Finance NLP Pipeline Report</h1>
+          <h2>Source: {source} &nbsp;|&nbsp; {data.get("analyzed",0)} articles &nbsp;|&nbsp; {elapsed}s &nbsp;|&nbsp; {now}</h2>
+          <div class="bar">
+            <div style="width:{b_pct}%;background:#22c55e"></div>
+            <div style="width:{r_pct}%;background:#ef4444"></div>
+            <div style="width:{n_pct}%;background:#6b7280"></div>
+          </div>
+          <span style="color:#22c55e">▲ {counts.get("Bullish",0)} Bullish ({b_pct}%)</span> &nbsp;
+          <span style="color:#ef4444">▼ {counts.get("Bearish",0)} Bearish ({r_pct}%)</span> &nbsp;
+          <span style="color:#a3a3a3">— {counts.get("Neutral",0)} Neutral ({n_pct}%)</span>
+          <table>
+            <thead><tr><th>Article</th><th>Sentiment</th><th>Score</th><th>Tickers</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+          </body></html>"""
+
+          with open("finance_nlp_report.html", "w") as f:
+              f.write(html_out)
+          print("Report generated: finance_nlp_report.html")
+          EOF
+
+      # ── 7. Write GitHub Actions Job Summary ───────────────────────────────────
+      - name: Write job summary
+        run: |
+          python3 - <<'EOF'
+          import json
+
+          with open("pipeline_result.json") as f:
+              data = json.load(f)
+
+          counts  = data.get("counts", {})
+          results = data.get("results", [])
+          source  = data.get("source", "")
+          elapsed = data.get("elapsed_sec", 0)
+
+          lines = [
+              f"## Finance NLP Pipeline Results",
+              f"",
+              f"| Metric | Value |",
+              f"|--------|-------|",
+              f"| Source | `{source}` |",
+              f"| Articles fetched | {data.get('articles_in',0)} |",
+              f"| Articles analysed | {data.get('analyzed',0)} |",
+              f"| Elapsed | {elapsed}s |",
+              f"",
+              f"### Sentiment Breakdown",
+              f"| Label | Count |",
+              f"|-------|-------|",
+              f"| Bullish | {counts.get('Bullish',0)} |",
+              f"| Bearish | {counts.get('Bearish',0)} |",
+              f"| Neutral | {counts.get('Neutral',0)} |",
+              f"",
+              f"### Articles",
+              f"| Title | Sentiment | Score | Tickers |",
+              f"|-------|-----------|-------|---------|",
+          ]
+
+          for r in results:
+              s = r.get("sentiment", {})
+              e = r.get("entities", {})
+              label    = s.get("label", "Neutral")
+              compound = s.get("compound", 0)
+              tickers  = ", ".join(e.get("tickers", [])[:4]) or "—"
+              title    = r.get("title", "")[:80]
+              link     = r.get("link", "")
+              icon     = {"Bullish": "▲", "Bearish": "▼", "Neutral": "—"}.get(label, "—")
+              t_cell   = f"[{title}]({link})" if link else title
+              lines.append(f"| {t_cell} | {icon} {label} | `{compound:+.3f}` | {tickers} |")
+
+          with open("$GITHUB_STEP_SUMMARY", "a") as f:
+              f.write("\n".join(lines))
+          EOF
+
+      # ── 8. Upload artifacts ───────────────────────────────────────────────────
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: finance-nlp-results-${{ github.run_number }}
+          path: |
+            pipeline_result.json
+            finance_nlp_report.html
+          retention-days: 30

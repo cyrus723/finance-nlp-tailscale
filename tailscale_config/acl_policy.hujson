@@ -1,0 +1,114 @@
+// Tailscale ACL Policy — Finance NLP Mesh
+// ==========================================
+// HuJSON format (JSON with comments).  Paste this in:
+//   https://login.tailscale.com/admin/acls
+//
+// CONCEPT — Zero-trust network access (ZTNA):
+//   Instead of "everyone inside the VPN can reach everything", Tailscale ACLs
+//   let you say exactly which node/tag can call which other node/tag on which
+//   port.  Each rule is a one-line allow statement; anything not listed is
+//   denied by default.
+
+{
+  // ── Tag definitions ────────────────────────────────────────────────────────
+  // Tags group machines by role.  Assign tags when you run `tailscale up` or
+  // via the admin console.  Tags do NOT expire like user sessions do.
+  "tagOwners": {
+    "tag:ingestion":  ["autogroup:admin"],  // machines that fetch news
+    "tag:nlp":        ["autogroup:admin"],  // machines that run NLP
+    "tag:storage":    ["autogroup:admin"],  // machines that hold the database
+    "tag:dashboard":  ["autogroup:admin"],  // machines that serve the web UI
+    "tag:monitoring": ["autogroup:admin"]   // optional: Prometheus / Grafana
+  },
+
+  // ── Access rules ───────────────────────────────────────────────────────────
+  // Format:  { "action": "accept", "src": [...], "dst": [...], "proto": "tcp" }
+  // Each dst is  "tag:X:port"  or  "tag:X:port-range"
+  "acls": [
+
+    // 1. Dashboard can call Ingestion (fetch news)
+    {
+      "action": "accept",
+      "src":    ["tag:dashboard"],
+      "dst":    ["tag:ingestion:8001"],
+      "proto":  "tcp"
+    },
+
+    // 2. Dashboard can call NLP Processor (run analysis)
+    {
+      "action": "accept",
+      "src":    ["tag:dashboard"],
+      "dst":    ["tag:nlp:8002"],
+      "proto":  "tcp"
+    },
+
+    // 3. Dashboard can call Storage (read/write articles)
+    {
+      "action": "accept",
+      "src":    ["tag:dashboard"],
+      "dst":    ["tag:storage:8003"],
+      "proto":  "tcp"
+    },
+
+    // 4. Ingestion can NOT call NLP or Storage directly — it only serves data.
+    //    (No rule needed; default-deny covers it.)
+
+    // 5. Admins (your laptop) can SSH into all nodes for maintenance.
+    {
+      "action": "accept",
+      "src":    ["autogroup:admin"],
+      "dst":    ["tag:ingestion:22", "tag:nlp:22", "tag:storage:22", "tag:dashboard:22"],
+      "proto":  "tcp"
+    },
+
+    // 6. Monitoring node can scrape Prometheus metrics from all services.
+    {
+      "action": "accept",
+      "src":    ["tag:monitoring"],
+      "dst":    [
+        "tag:ingestion:9090",
+        "tag:nlp:9090",
+        "tag:storage:9090",
+        "tag:dashboard:9090"
+      ],
+      "proto": "tcp"
+    }
+  ],
+
+  // ── MagicDNS / node naming ─────────────────────────────────────────────────
+  // When MagicDNS is enabled (default on most tailnets) each machine is
+  // reachable by its short name or the full name:
+  //   ingestion-node               (short)
+  //   ingestion-node.tail1ab2c.ts.net  (full)
+  //
+  // TIP: Name your machines exactly as below for the .env file to work.
+  //   Machine name    →  Tag
+  //   ingestion-node  →  tag:ingestion
+  //   nlp-node        →  tag:nlp
+  //   storage-node    →  tag:storage
+  //   dashboard-node  →  tag:dashboard
+
+  // ── SSH configuration ──────────────────────────────────────────────────────
+  // Tailscale SSH replaces traditional SSH keys with identity-based auth.
+  // Admins can SSH to any tagged node without distributing key files.
+  "ssh": [
+    {
+      "action": "accept",
+      "src":    ["autogroup:admin"],
+      "dst":    ["autogroup:self"],
+      "users":  ["autogroup:nonroot", "root"]
+    }
+  ],
+
+  // ── Funnel (optional public HTTPS endpoint) ────────────────────────────────
+  // Uncomment the block below to expose the dashboard to the internet via
+  // Tailscale Funnel (a managed HTTPS reverse proxy).  Run on dashboard-node:
+  //   tailscale funnel 8000
+  //
+  // "nodeAttrs": [
+  //   {
+  //     "target": ["tag:dashboard"],
+  //     "attr":   ["funnel"]
+  //   }
+  // ]
+}

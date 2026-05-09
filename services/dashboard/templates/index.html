@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Finance NLP · Powered by Tailscale</title>
+  <style>
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --card:     #21253a;
+      --border:   #2e3250;
+      --accent:   #4d9fff;
+      --bullish:  #22c55e;
+      --bearish:  #ef4444;
+      --neutral:  #a3a3a3;
+      --text:     #e2e8f0;
+      --muted:    #64748b;
+      --ts:       #5b7ffd;   /* Tailscale brand blue */
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; }
+
+    /* ── Layout ── */
+    header { background: var(--surface); border-bottom: 1px solid var(--border);
+             padding: 14px 24px; display: flex; align-items: center; gap: 14px; }
+    header h1 { font-size: 18px; font-weight: 700; }
+    header .badge { background: var(--ts); color: #fff; font-size: 11px;
+                    padding: 3px 8px; border-radius: 99px; letter-spacing: .5px; }
+    main { max-width: 1280px; margin: 0 auto; padding: 24px; display: grid;
+           grid-template-columns: 280px 1fr; gap: 20px; }
+
+    /* ── Sidebar ── */
+    .sidebar { display: flex; flex-direction: column; gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+    .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+                color: var(--muted); margin-bottom: 12px; }
+
+    /* controls */
+    select, button { width: 100%; padding: 8px 12px; border-radius: 6px;
+                     border: 1px solid var(--border); background: var(--surface);
+                     color: var(--text); font-size: 13px; cursor: pointer; }
+    button.primary { background: var(--ts); border-color: var(--ts); color: #fff;
+                     font-weight: 600; margin-top: 8px; transition: opacity .15s; }
+    button.primary:hover { opacity: .85; }
+    button.primary:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* nodes */
+    .node-row { display: flex; align-items: center; gap: 8px; padding: 6px 0;
+                border-bottom: 1px solid var(--border); }
+    .node-row:last-child { border: none; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+    .dot.online  { background: var(--bullish); }
+    .dot.offline { background: var(--bearish); }
+    .node-name  { font-size: 12px; font-weight: 600; flex: 1; }
+    .node-ms    { font-size: 11px; color: var(--muted); }
+
+    /* sentiment bar */
+    .sentiment-bar { height: 12px; border-radius: 99px; overflow: hidden;
+                     display: flex; margin-top: 8px; }
+    .sentiment-bar .b { transition: width .5s ease; }
+    .bullish-bar { background: var(--bullish); }
+    .bearish-bar { background: var(--bearish); }
+    .neutral-bar { background: var(--neutral); }
+    .legend      { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+    .legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+    .legend-dot  { width: 8px; height: 8px; border-radius: 2px; }
+
+    /* tickers */
+    .ticker-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .ticker-chip { background: var(--surface); border: 1px solid var(--border);
+                   border-radius: 4px; padding: 3px 7px; font-size: 11px;
+                   font-family: monospace; font-weight: 600; }
+
+    /* ── Content ── */
+    .content { display: flex; flex-direction: column; gap: 16px; }
+
+    /* pipeline log */
+    #pipeline-log { background: #0a0c12; border: 1px solid var(--border);
+                    border-radius: 10px; padding: 14px 16px; font-family: monospace;
+                    font-size: 12px; color: #7dd3fc; line-height: 1.8;
+                    min-height: 80px; max-height: 160px; overflow-y: auto; }
+    #pipeline-log .ok  { color: #86efac; }
+    #pipeline-log .err { color: #fca5a5; }
+    #pipeline-log .ts  { color: #818cf8; }
+
+    /* article cards */
+    #articles { display: flex; flex-direction: column; gap: 12px; }
+    .article-card { background: var(--card); border: 1px solid var(--border);
+                    border-radius: 10px; padding: 14px 16px; display: grid;
+                    grid-template-columns: 1fr auto; gap: 10px; align-items: start; }
+    .article-title { font-weight: 600; font-size: 14px; line-height: 1.4; }
+    .article-title a { color: var(--text); text-decoration: none; }
+    .article-title a:hover { color: var(--accent); }
+    .article-meta  { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .article-entities { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .entity-chip { font-size: 10px; padding: 2px 6px; border-radius: 4px;
+                   font-family: monospace; font-weight: 700; }
+    .entity-ticker  { background: #1e3a5f; color: #7dd3fc; }
+    .entity-company { background: #1a2e1a; color: #86efac; }
+    .entity-amount  { background: #2e2212; color: #fcd34d; }
+    .entity-pct     { background: #2e1a2e; color: #e879f9; }
+
+    .sentiment-badge { padding: 4px 10px; border-radius: 6px; font-size: 12px;
+                       font-weight: 700; white-space: nowrap; }
+    .Bullish { background: #14532d; color: var(--bullish); }
+    .Bearish { background: #450a0a; color: var(--bearish); }
+    .Neutral { background: #1e1e1e; color: var(--neutral); }
+    .compound { font-size: 10px; color: var(--muted); text-align: right; margin-top: 4px; }
+
+    /* tailscale explainer */
+    .ts-box { background: #111827; border: 1px solid #2e3a6e; border-radius: 10px;
+               padding: 14px 16px; font-size: 12px; line-height: 1.7; color: #94a3b8; }
+    .ts-box strong { color: #818cf8; }
+    .ts-box code { background: #1e2a40; padding: 1px 5px; border-radius: 3px;
+                   font-family: monospace; font-size: 11px; color: #7dd3fc; }
+
+    /* spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { display: inline-block; width: 14px; height: 14px;
+               border: 2px solid transparent; border-top-color: #fff;
+               border-radius: 50%; animation: spin .6s linear infinite;
+               vertical-align: middle; margin-right: 6px; }
+
+    /* responsive */
+    @media (max-width: 768px) {
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg width="26" height="26" viewBox="0 0 26 26" fill="none">
+    <circle cx="13" cy="13" r="13" fill="#5b7ffd"/>
+    <path d="M8 13h10M13 8v10" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+  </svg>
+  <h1>Finance NLP &mdash; Tailscale Mesh Pipeline</h1>
+  <span class="badge">TAILSCALE POWERED</span>
+</header>
+
+<main>
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+
+    <!-- Controls -->
+    <div class="card">
+      <h2>Run Pipeline</h2>
+      <label style="font-size:12px;color:var(--muted)">News Source</label>
+      <select id="source" style="margin-top:4px;margin-bottom:8px;">
+        <option value="yahoo_finance">Yahoo Finance</option>
+        <option value="reuters_business">Reuters Business</option>
+        <option value="cnbc_top">CNBC Top Stories</option>
+        <option value="marketwatch">MarketWatch</option>
+        <option value="seeking_alpha">Seeking Alpha</option>
+      </select>
+      <label style="font-size:12px;color:var(--muted)">Articles to fetch</label>
+      <select id="limit" style="margin-top:4px;">
+        <option value="5">5 articles</option>
+        <option value="10" selected>10 articles</option>
+        <option value="20">20 articles</option>
+      </select>
+      <button class="primary" id="runBtn" onclick="runPipeline()">▶ Run Pipeline</button>
+    </div>
+
+    <!-- Node health -->
+    <div class="card">
+      <h2>Tailscale Nodes</h2>
+      <div id="nodes">
+        <div class="node-row"><div class="dot"></div><span class="node-name">ingestion-node</span><span class="node-ms">checking…</span></div>
+        <div class="node-row"><div class="dot"></div><span class="node-name">nlp-node</span><span class="node-ms">checking…</span></div>
+        <div class="node-row"><div class="dot"></div><span class="node-name">storage-node</span><span class="node-ms">checking…</span></div>
+      </div>
+      <button onclick="checkHealth()" style="margin-top:10px;font-size:12px;">↻ Refresh</button>
+    </div>
+
+    <!-- Sentiment overview -->
+    <div class="card">
+      <h2>Market Sentiment</h2>
+      <div class="sentiment-bar" id="sentimentBar">
+        <div class="b bullish-bar" style="width:33%"></div>
+        <div class="b bearish-bar" style="width:33%"></div>
+        <div class="b neutral-bar" style="width:34%"></div>
+      </div>
+      <div class="legend" id="sentimentLegend" style="margin-top:10px;">
+        <span class="legend-item"><span class="legend-dot" style="background:var(--bullish)"></span>Bullish —%</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--bearish)"></span>Bearish —%</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--neutral)"></span>Neutral —%</span>
+      </div>
+    </div>
+
+    <!-- Top tickers -->
+    <div class="card">
+      <h2>Trending Tickers</h2>
+      <div class="ticker-list" id="tickers"><span style="color:var(--muted)">Run a pipeline to see tickers</span></div>
+    </div>
+
+    <!-- Tailscale tip -->
+    <div class="ts-box">
+      <strong>How Tailscale works here:</strong><br>
+      Each service (ingestion, NLP, storage) runs on a separate machine.
+      Tailscale connects them via a <strong>WireGuard mesh</strong> — no port
+      forwarding, no static IPs. The dashboard calls peers by
+      <code>MagicDNS</code> hostname, e.g.
+      <code>nlp-node.tail1ab2c.ts.net</code>.
+      <br><br>
+      Traffic is <strong>end-to-end encrypted</strong> and access is controlled
+      by an <strong>ACL policy</strong> — only authorised nodes can call each
+      endpoint.
+    </div>
+
+  </aside>
+
+  <!-- ── Content ── -->
+  <section class="content">
+
+    <!-- Pipeline log -->
+    <div class="card">
+      <h2>Pipeline Log</h2>
+      <div id="pipeline-log">Waiting for pipeline run…</div>
+    </div>
+
+    <!-- Article results -->
+    <div class="card">
+      <h2>Analysed Articles</h2>
+      <div id="articles"><span style="color:var(--muted);font-size:13px;">
+        Click <em>Run Pipeline</em> to fetch and analyse financial news.
+      </span></div>
+    </div>
+
+  </section>
+</main>
+
+<script>
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const log = (msg, cls='') => {
+    const el = document.getElementById('pipeline-log');
+    el.innerHTML += `<div class="${cls}">${msg}</div>`;
+    el.scrollTop = el.scrollHeight;
+  };
+  const clearLog = () => { document.getElementById('pipeline-log').innerHTML = ''; };
+
+  const sentimentColor = label =>
+    label === 'Bullish' ? 'var(--bullish)' :
+    label === 'Bearish' ? 'var(--bearish)' : 'var(--neutral)';
+
+  // ── Node health ────────────────────────────────────────────────────────────
+  async function checkHealth() {
+    const data = await fetch('/api/health').then(r => r.json()).catch(() => ({ nodes: [] }));
+    const rows = document.querySelectorAll('#nodes .node-row');
+    (data.nodes || []).forEach((n, i) => {
+      if (!rows[i]) return;
+      const dot  = rows[i].querySelector('.dot');
+      const ms   = rows[i].querySelector('.node-ms');
+      dot.className = 'dot ' + (n.status === 'online' ? 'online' : 'offline');
+      ms.textContent = n.status === 'online' ? `${n.latency_ms} ms` : 'offline';
+    });
+  }
+
+  // ── Stats ──────────────────────────────────────────────────────────────────
+  async function refreshStats() {
+    const data = await fetch('/api/stats').then(r => r.json()).catch(() => null);
+    if (!data || data.error) return;
+    const s = data.sentiment;
+    if (s && s.total > 0) {
+      document.querySelector('.bullish-bar').style.width = s.bullish_pct + '%';
+      document.querySelector('.bearish-bar').style.width = s.bearish_pct + '%';
+      document.querySelector('.neutral-bar').style.width = s.neutral_pct  + '%';
+      document.getElementById('sentimentLegend').innerHTML = `
+        <span class="legend-item"><span class="legend-dot" style="background:var(--bullish)"></span>Bullish ${s.bullish_pct}%</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--bearish)"></span>Bearish ${s.bearish_pct}%</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--neutral)"></span>Neutral ${s.neutral_pct}%</span>
+      `;
+    }
+    if (data.top_tickers && data.top_tickers.length) {
+      document.getElementById('tickers').innerHTML =
+        data.top_tickers.map(t =>
+          `<span class="ticker-chip">${t.ticker} <span style="color:var(--muted);font-weight:400">${t.mentions}</span></span>`
+        ).join('');
+    }
+  }
+
+  // ── Run pipeline ───────────────────────────────────────────────────────────
+  async function runPipeline() {
+    const btn    = document.getElementById('runBtn');
+    const source = document.getElementById('source').value;
+    const limit  = document.getElementById('limit').value;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Running…';
+    clearLog();
+
+    log(`[00:00] <span class="ts">▶ Tailscale mesh pipeline started</span>`);
+    log(`[00:00] Source: <strong>${source}</strong> · Limit: ${limit} articles`);
+    log(`[00:00] <span class="ts">→ ingestion-node</span> GET /news …`);
+
+    const t0 = Date.now();
+    let data;
+    try {
+      const r = await fetch(`/api/run?source=${source}&limit=${limit}`);
+      data = await r.json();
+    } catch(e) {
+      log(`[ERR] Pipeline failed: ${e}`, 'err');
+      btn.disabled = false; btn.innerHTML = '▶ Run Pipeline';
+      return;
+    }
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(2);
+
+    if (data.error) {
+      log(`[ERR] ${data.error}`, 'err');
+    } else {
+      log(`[${elapsed}s] <span class="ok">✔ Ingestion</span> — ${data.articles_in} articles fetched`);
+      log(`[${elapsed}s] <span class="ts">→ nlp-node</span> POST /analyze/batch …`);
+      log(`[${elapsed}s] <span class="ok">✔ NLP</span> — ${data.analyzed} articles analysed`);
+      log(`[${elapsed}s] <span class="ts">→ storage-node</span> POST /articles + /analyses …`);
+      log(`[${elapsed}s] <span class="ok">✔ Storage</span> — results persisted`);
+      const c = data.counts || {};
+      log(`[${elapsed}s] Sentiment: <span style="color:var(--bullish)">▲ ${c.Bullish||0} Bullish</span> · <span style="color:var(--bearish)">▼ ${c.Bearish||0} Bearish</span> · <span style="color:var(--neutral)">— ${c.Neutral||0} Neutral</span>`);
+      if (data.errors && data.errors.length)
+        data.errors.forEach(e => log(`[WARN] ${e}`, 'err'));
+      log(`[${elapsed}s] <span class="ts">Pipeline complete in ${data.elapsed_sec}s</span>`);
+      renderArticles(data.results);
+    }
+
+    btn.disabled = false; btn.innerHTML = '▶ Run Pipeline';
+    checkHealth();
+    refreshStats();
+  }
+
+  // ── Render articles ────────────────────────────────────────────────────────
+  function renderArticles(results) {
+    const el = document.getElementById('articles');
+    if (!results || !results.length) {
+      el.innerHTML = '<span style="color:var(--muted)">No results returned.</span>';
+      return;
+    }
+    el.innerHTML = results.map(r => {
+      const s = r.sentiment || {};
+      const e = r.entities  || {};
+      const chips = [
+        ...(e.tickers   || []).slice(0,5).map(t => `<span class="entity-chip entity-ticker">${t}</span>`),
+        ...(e.companies || []).slice(0,3).map(c => `<span class="entity-chip entity-company">${c}</span>`),
+        ...(e.amounts   || []).slice(0,3).map(a => `<span class="entity-chip entity-amount">${a}</span>`),
+        ...(e.percentages||[]).slice(0,3).map(p => `<span class="entity-chip entity-pct">${p}</span>`),
+      ].join('');
+      return `
+        <div class="article-card">
+          <div>
+            <div class="article-title">
+              ${r.link ? `<a href="${r.link}" target="_blank">${r.title}</a>` : r.title}
+            </div>
+            <div class="article-meta">${r.source || ''} · ${r.published ? r.published.slice(0,25) : ''}</div>
+            ${chips ? `<div class="article-entities">${chips}</div>` : ''}
+          </div>
+          <div style="text-align:right;flex-shrink:0;">
+            <span class="sentiment-badge ${s.label||'Neutral'}">${s.label||'Neutral'}</span>
+            <div class="compound">compound: ${(s.compound||0).toFixed(3)}</div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  checkHealth();
+  refreshStats();
+</script>
+
+</body>
+</html>

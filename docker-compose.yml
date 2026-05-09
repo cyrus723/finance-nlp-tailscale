@@ -1,0 +1,78 @@
+# docker-compose.yml — LOCAL DEVELOPMENT (no Tailscale)
+# ========================================================
+# All four services run on localhost, each on its own port.
+# Inter-service communication uses Docker's internal DNS (`service name`).
+#
+# Run:  docker compose up --build
+# Open: http://localhost:8000
+#
+# TAILSCALE EQUIVALENT:
+#   In production replace "ingestion", "nlp", "storage" hostnames below with
+#   Tailscale MagicDNS names and point each service at its own machine.
+
+version: "3.9"
+
+services:
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    ports: ["8001:8001"]
+    environment:
+      INGESTION_PORT: "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  nlp:
+    build:
+      context: .
+      dockerfile: services/nlp_processor/Dockerfile
+    ports: ["8002:8002"]
+    environment:
+      NLP_PORT: "8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  storage:
+    build:
+      context: .
+      dockerfile: services/storage/Dockerfile
+    ports: ["8003:8003"]
+    environment:
+      STORAGE_PORT: "8003"
+    volumes:
+      - storage_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+    ports: ["8000:8000"]
+    environment:
+      DASHBOARD_PORT:  "8000"
+      # Docker internal DNS — services talk by container name
+      INGESTION_HOST:  "ingestion"
+      INGESTION_PORT:  "8001"
+      NLP_HOST:        "nlp"
+      NLP_PORT:        "8002"
+      STORAGE_HOST:    "storage"
+      STORAGE_PORT:    "8003"
+    depends_on:
+      ingestion: { condition: service_healthy }
+      nlp:       { condition: service_healthy }
+      storage:   { condition: service_healthy }
+
+volumes:
+  storage_data:

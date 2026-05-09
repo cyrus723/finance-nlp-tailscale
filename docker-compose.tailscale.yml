@@ -1,0 +1,115 @@
+# docker-compose.tailscale.yml — PRODUCTION (with Tailscale sidecars)
+# =====================================================================
+# Each service container runs alongside a tailscaled sidecar that joins it to
+# your tailnet.  They share the same network namespace so the main container
+# inherits the Tailscale IP and MagicDNS hostname.
+#
+# Prerequisites:
+#   1. Create an auth key at https://login.tailscale.com/admin/settings/keys
+#      (check "Reusable" and add tags: tag:ingestion, tag:nlp, tag:storage, tag:dashboard)
+#   2. Copy .env.example to .env and set TAILSCALE_AUTH_KEY
+#   3. Run: docker compose -f docker-compose.tailscale.yml up --build
+#
+# CONCEPT — Why sidecar?
+#   The sidecar pattern is a lightweight way to add Tailscale to any existing
+#   container without modifying it.  The sidecar runs `tailscaled` and
+#   authenticates to your tailnet using an auth key.  The main container
+#   then sees the Tailscale interface (ts0) automatically.
+
+version: "3.9"
+
+x-tailscale-sidecar: &ts-sidecar
+  image: tailscale/tailscale:latest
+  restart: unless-stopped
+  cap_add: [NET_ADMIN, SYS_MODULE]
+  volumes:
+    - /dev/net/tun:/dev/net/tun
+    - tailscale_state:/var/lib/tailscale
+
+services:
+
+  # ── Ingestion node ──────────────────────────────────────────────────────────
+  ingestion-ts:
+    <<: *ts-sidecar
+    hostname: ingestion-node          # becomes the MagicDNS name
+    environment:
+      TS_AUTHKEY:       "${TAILSCALE_AUTH_KEY}"
+      TS_EXTRA_ARGS:    "--advertise-tags=tag:ingestion"
+      TS_STATE_DIR:     "/var/lib/tailscale"
+      TS_USERSPACE:     "false"
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    network_mode: "service:ingestion-ts"   # shares the Tailscale network
+    environment:
+      INGESTION_PORT: "8001"
+    depends_on: [ingestion-ts]
+
+  # ── NLP Processor node ──────────────────────────────────────────────────────
+  nlp-ts:
+    <<: *ts-sidecar
+    hostname: nlp-node
+    environment:
+      TS_AUTHKEY:       "${TAILSCALE_AUTH_KEY}"
+      TS_EXTRA_ARGS:    "--advertise-tags=tag:nlp"
+      TS_STATE_DIR:     "/var/lib/tailscale"
+      TS_USERSPACE:     "false"
+
+  nlp:
+    build:
+      context: .
+      dockerfile: services/nlp_processor/Dockerfile
+    network_mode: "service:nlp-ts"
+    environment:
+      NLP_PORT: "8002"
+    depends_on: [nlp-ts]
+
+  # ── Storage node ────────────────────────────────────────────────────────────
+  storage-ts:
+    <<: *ts-sidecar
+    hostname: storage-node
+    environment:
+      TS_AUTHKEY:       "${TAILSCALE_AUTH_KEY}"
+      TS_EXTRA_ARGS:    "--advertise-tags=tag:storage"
+      TS_STATE_DIR:     "/var/lib/tailscale"
+      TS_USERSPACE:     "false"
+
+  storage:
+    build:
+      context: .
+      dockerfile: services/storage/Dockerfile
+    network_mode: "service:storage-ts"
+    volumes:
+      - storage_data:/app/data
+    environment:
+      STORAGE_PORT: "8003"
+    depends_on: [storage-ts]
+
+  # ── Dashboard node ──────────────────────────────────────────────────────────
+  dashboard-ts:
+    <<: *ts-sidecar
+    hostname: dashboard-node
+    environment:
+      TS_AUTHKEY:       "${TAILSCALE_AUTH_KEY}"
+      TS_EXTRA_ARGS:    "--advertise-tags=tag:dashboard"
+      TS_STATE_DIR:     "/var/lib/tailscale"
+      TS_USERSPACE:     "false"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+    network_mode: "service:dashboard-ts"
+    environment:
+      DASHBOARD_PORT: "8000"
+      # MagicDNS hostnames — no IPs, no port forwarding
+      INGESTION_HOST: "ingestion-node"
+      NLP_HOST:       "nlp-node"
+      STORAGE_HOST:   "storage-node"
+    depends_on: [dashboard-ts, ingestion, nlp, storage]
+
+volumes:
+  tailscale_state:
+  storage_data:
